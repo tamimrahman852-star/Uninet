@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1.7
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY services/chat-service/go.mod services/chat-service/go.sum* ./
+RUN go mod download
+COPY services/chat-service/ ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/chat-service .
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/chat-service /chat-service
+EXPOSE 4002
+USER nonroot:nonroot
+ENTRYPOINT ["/chat-service"]

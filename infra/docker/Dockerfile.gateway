@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.7
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY api-gateway/package.json api-gateway/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+COPY api-gateway/tsconfig.json ./
+COPY api-gateway/src ./src
+RUN npm run build
+
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY api-gateway/package.json api-gateway/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi
+
+FROM node:20-alpine
+ENV NODE_ENV=production
+WORKDIR /app
+RUN addgroup -S app && adduser -S app -G app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY api-gateway/package.json ./
+USER app
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=5 \
+  CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+CMD ["node", "dist/main.js"]

@@ -1,0 +1,173 @@
+name: uninet
+
+x-common-env: &common-env
+  SUPABASE_URL: ${SUPABASE_URL:?set SUPABASE_URL in .env}
+  SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET:?set SUPABASE_JWT_SECRET in .env}
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cassandra:
+    image: cassandra:4.1
+    environment:
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    volumes: [cassandra-data:/var/lib/cassandra]
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.gateway
+    ports: ["8080:8080"]
+    environment:
+      <<: *common-env
+      PORT: 8080
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-}
+      AUTH_SERVICE_URL: http://auth:4001
+      CHAT_SERVICE_URL: http://chat:4002
+      ECOMMERCE_SERVICE_URL: http://ecommerce:4003
+      MEDIA_SERVICE_URL: http://media:4004
+      AI_SERVICE_URL: http://ai:4005
+    depends_on:
+      redis: { condition: service_healthy }
+      auth: { condition: service_started }
+    restart: unless-stopped
+
+  auth:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.auth
+    environment:
+      <<: *common-env
+      PORT: 4001
+      NODE_ENV: production
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?set SUPABASE_ANON_KEY in .env}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set SUPABASE_SERVICE_ROLE_KEY in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    restart: unless-stopped
+
+  chat:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.chat
+    environment:
+      <<: *common-env
+      PORT: 4002
+      REDIS_URL: redis://redis:6379
+      CASSANDRA_HOSTS: cassandra
+      CASSANDRA_KEYSPACE: ${CASSANDRA_KEYSPACE:-uninet_chat}
+      ALLOWED_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      redis: { condition: service_healthy }
+      cassandra: { condition: service_healthy }
+    restart: unless-stopped
+
+  ecommerce:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.ecommerce
+    environment:
+      <<: *common-env
+      PORT: 4003
+      NODE_ENV: production
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set SUPABASE_SERVICE_ROLE_KEY in .env}
+      REDIS_URL: redis://redis:6379
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      BKASH_BASE_URL: ${BKASH_BASE_URL:-https://tokenized.sandbox.bka.sh/v1.2.0-beta}
+      BKASH_APP_KEY: ${BKASH_APP_KEY:-}
+      BKASH_APP_SECRET: ${BKASH_APP_SECRET:-}
+      BKASH_USERNAME: ${BKASH_USERNAME:-}
+      BKASH_PASSWORD: ${BKASH_PASSWORD:-}
+      SSLCOMMERZ_STORE_ID: ${SSLCOMMERZ_STORE_ID:-}
+      SSLCOMMERZ_STORE_PASSWORD: ${SSLCOMMERZ_STORE_PASSWORD:-}
+      SSLCOMMERZ_IS_LIVE: ${SSLCOMMERZ_IS_LIVE:-false}
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  media:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.media
+    environment:
+      <<: *common-env
+      PORT: 4004
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set SUPABASE_SERVICE_ROLE_KEY in .env}
+      INTERNAL_GATEWAY_SECRET: ${INTERNAL_GATEWAY_SECRET:-}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_REGION: ${S3_REGION:-ap-southeast-1}
+      S3_BUCKET: ${S3_BUCKET:-uninet-media}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL:-}
+    volumes: [media-tmp:/tmp/uninet-media]
+    restart: unless-stopped
+
+  ai:
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.ai
+    environment:
+      <<: *common-env
+      PORT: 4005
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?set SUPABASE_SERVICE_ROLE_KEY in .env}
+      REDIS_URL: redis://redis:6379
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_API_KEY: ${LLM_API_KEY:?set LLM_API_KEY in .env}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-sonnet-5-5}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://api.openai.com/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Optional self-hosted inference (needs an NVIDIA GPU): docker compose --profile vllm up
+  # Then set LLM_PROVIDER=openai, LLM_BASE_URL=http://vllm:8000/v1, LLM_MODEL=<model id>.
+  vllm:
+    profiles: ["vllm"]
+    image: vllm/vllm-openai:latest
+    command:
+      - --model=${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --enable-prefix-caching
+      - --gpu-memory-utilization=0.90
+      - --max-num-seqs=128
+      - --max-model-len=8192
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes: [hf-cache:/root/.cache/huggingface]
+
+volumes:
+  redis-data:
+  cassandra-data:
+  media-tmp:
+  hf-cache:
